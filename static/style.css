@@ -1,0 +1,51 @@
+body {
+    font-family: Arial, sans-serif;
+    margin: 20px;
+}
+
+#fileInput {
+    margin-bottom: 10px;
+}
+
+.progress {
+    margin-top: 20px;
+    height: 30px;
+}
+
+.progress-bar {
+    line-height: 30px;
+    color: white;
+    text-align: center;
+}
+
+#status {
+    margin-top: 20px;
+}
+
+.custom-file-label::after {
+    content: "Escolher arquivo";
+}
+
+.btn {
+    padding: 10px;
+    margin: 5px;
+}
+
+.table-container {
+    max-height: 400px;
+    overflow: auto;
+}
+
+.exists-text {
+    margin-left: 10px;
+    color: #dc3545;
+    font-weight: bold;
+}
+
+#m3u-files-container {
+    margin-top: 20px;
+}
+
+.incomplete {
+    background-color: #fff3cd;
+}

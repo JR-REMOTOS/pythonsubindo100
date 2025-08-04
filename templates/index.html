@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gerenciador de M3U - CyberHub</title>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Orbitron', sans-serif;
+            background-color: #0a0a0a;
+            color: #00ffcc;
+            margin: 0;
+            padding: 0;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        h1, h2 {
+            text-align: center;
+            color: #00ffcc;
+            text-shadow: 0 0 10px #00ffcc;
+        }
+        form {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        input[type="file"] {
+            padding: 5px;
+            background-color: #1a1a1a;
+            border: 1px solid #00ffcc;
+            color: #00ffcc;
+            border-radius: 5px;
+        }
+        button {
+            padding: 10px 20px;
+            background-color: #00ffcc;
+            color: #0a0a0a;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        button:hover {
+            background-color: #00cc99;
+            box-shadow: 0 0 10px #00ffcc;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background-color: #1a1a1a;
+            margin-top: 20px;
+        }
+        th, td {
+            padding: 10px;
+            text-align: left;
+            border-bottom: 1px solid #00ffcc;
+        }
+        th {
+            background-color: #00ffcc;
+            color: #0a0a0a;
+        }
+        .progress-bar {
+            width: 100%;
+            background-color: #1a1a1a;
+            border-radius: 5px;
+            overflow: hidden;
+            margin-top: 10px;
+        }
+        .progress {
+            height: 20px;
+            background-color: #00ffcc;
+            text-align: center;
+            line-height: 20px;
+            color: #0a0a0a;
+            transition: width 0.3s;
+        }
+        .file-progress {
+            margin-top: 10px;
+            padding: 10px;
+            background-color: #1a1a1a;
+            border: 1px solid #00ffcc;
+            border-radius: 5px;
+        }
+        .popup {
+            display: none;
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background-color: #1a1a1a;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 0 20px #00ffcc;
+            z-index: 1001;
+            max-width: 500px;
+            color: #00ffcc;
+        }
+        .overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 1000;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Gerenciador de M3U - CyberHub</h1>
+        <h2>Upload de Arquivos M3U</h2>
+        <form id="uploadForm" enctype="multipart/form-data">
+            <input type="file" id="fileInput" name="m3uFile" accept=".m3u" multiple>
+            <button type="button" id="uploadBtn">Carregar Arquivos</button>
+        </form>
+        <div id="fileProgress"></div>
+        <h2>Resultados</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Status</th>
+                    <th>Tipo</th>
+                    <th>Título</th>
+                    <th>Grupo</th>
+                    <th>URL</th>
+                </tr>
+            </thead>
+            <tbody id="table-body"></tbody>
+        </table>
+        <h2>Lista de Arquivos</h2>
+        <table id="fileList">
+            <thead>
+                <tr>
+                    <th>Nome do Arquivo</th>
+                    <th>Total de Itens</th>
+                    <th>Itens Processados</th>
+                    <th>Status</th>
+                    <th>Ações</th>
+                </tr>
+            </thead>
+            <tbody id="m3u-files-body"></tbody>
+        </table>
+        <h2>Duplicatas</h2>
+        <button onclick="listDuplicates()">Listar Duplicatas</button>
+        <button id="deleteDuplicatesBtn" onclick="deleteDuplicates()">Apagar Duplicatas</button>
+    </div>
+
+    <div class="overlay" id="overlay"></div>
+    <div class="popup" id="popup">
+        <h3 id="popupTitle"></h3>
+        <p>Total de Duplicatas: <span id="popupTotalDuplicates">0</span></p>
+        <p>Duplicatas Removidas: <span id="popupDeletedCount">0</span></p>
+        <p>Progresso: <span id="popupProgress">0</span>%</p>
+        <ul id="popupDuplicates"></ul>
+        <button onclick="closePopup()" id="closePopupBtn">Fechar</button>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+    <script>
+        let totalRequests = 0, adicionando = 0, existente = 0, Erro = 0;
+
+        window.onload = loadM3UFiles;
+
+        document.getElementById('uploadBtn').addEventListener('click', uploadMultipleFiles);
+
+        async function uploadMultipleFiles() {
+            const fileInput = document.getElementById('fileInput');
+            const files = fileInput.files;
+            if (files.length === 0) {
+                Swal.fire('Erro', 'Nenhum arquivo selecionado.', 'error');
+                return;
+            }
+
+            const fileProgressDiv = document.getElementById('fileProgress');
+            fileProgressDiv.innerHTML = '<p>Iniciando upload...</p>';
+
+            // Passo 1: Upload dos arquivos
+            const formData = new FormData();
+            for (let file of files) {
+                formData.append('m3uFile', file);
+            }
+
+            try {
+                const uploadResponse = await fetch('/api/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                const uploadResult = await uploadResponse.json();
+                if (!uploadResponse.ok) throw new Error(uploadResult.results.error[0].message);
+
+                const filenames = uploadResult.results.tempFiles;
+                fileProgressDiv.innerHTML = `<p>Arquivos enviados: ${filenames.join(', ')}</p>`;
+
+                // Passo 2: Processar arquivos sequencialmente
+                await processFiles(filenames, fileProgressDiv);
+
+                Swal.fire('Concluído', 'Todos os arquivos foram processados!', 'success');
+                loadM3UFiles();
+            } catch (error) {
+                fileProgressDiv.innerHTML += `<p style="color: red;">Erro: ${error.message}</p>`;
+                Swal.fire('Erro', `Erro ao processar: ${error.message}`, 'error');
+            }
+        }
+
+        async function processFiles(filenames, progressDiv) {
+            for (const filename of filenames) {
+                progressDiv.innerHTML += `<div class="file-progress" id="progress-${filename}">
+                    <p>Processando ${filename}...</p>
+                    <div class="progress-bar">
+                        <div id="progressBar-${filename}" class="progress" style="width: 0%;">0%</div>
+                    </div>
+                </div>`;
+
+                let completed = false;
+                while (!completed) {
+                    try {
+                        const response = await fetch('/api/process_files', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ filenames: [filename] })
+                        });
+                        const result = await response.json();
+                        if (!response.ok) throw new Error(result.results.error[0].message);
+
+                        const fileData = result.results.processed_files[0] || {};
+                        if (fileData.filename === filename) {
+                            const progress = fileData.progress || 0;
+                            const processed = fileData.processed || 0;
+                            const total = fileData.total || 0;
+                            updateFileProgress(filename, progress, processed, total, fileData);
+                            if (progress >= 100) {
+                                completed = true;
+                            }
+                        }
+                        await new Promise(resolve => setTimeout(resolve, 500));
+                    } catch (error) {
+                        progressDiv.innerHTML += `<p style="color: red;">Erro ao processar ${filename}: ${error.message}</p>`;
+                        break;
+                    }
+                }
+            }
+        }
+
+        function updateFileProgress(filename, progress, processed, total, data) {
+            const progressBar = document.getElementById(`progressBar-${filename}`);
+            progressBar.style.width = `${progress}%`;
+            progressBar.textContent = `${Math.round(progress)}% (${processed}/${total})`;
+
+            totalRequests = total;
+            adicionando = data.success?.length || 0;
+            existente = data.exists?.length || 0;
+            Erro = data.error?.length || 0;
+
+            const tbody = document.getElementById('table-body');
+            tbody.innerHTML = '';
+
+            if (data.success?.length) {
+                data.success.forEach(item => {
+                    tbody.innerHTML += `
+                        <tr>
+                            <td>Sucesso</td>
+                            <td>${item.type}</td>
+                            <td>${item.data.titulo}</td>
+                            <td>${item.data.groupTitle}</td>
+                            <td><a href="${item.data.url}" target="_blank">${item.data.url.substring(0, 30)}...</a></td>
+                        </tr>
+                    `;
+                });
+            }
+            if (data.exists?.length) {
+                data.exists.forEach(item => {
+                    tbody.innerHTML += `
+                        <tr>
+                            <td>Duplicado</td>
+                            <td>${item.type}</td>
+                            <td>${item.data.titulo}</td>
+                            <td>${item.data.groupTitle}</td>
+                            <td><a href="${item.data.url}" target="_blank">${item.data.url.substring(0, 30)}...</a></td>
+                        </tr>
+                    `;
+                });
+            }
+            if (data.error?.length) {
+                data.error.forEach(item => {
+                    tbody.innerHTML += `
+                        <tr>
+                            <td>Erro: ${item.message}</td>
+                            <td>${item.type}</td>
+                            <td>${item.data.titulo}</td>
+                            <td>${item.data.groupTitle}</td>
+                            <td><a href="${item.data.url}" target="_blank">${item.data.url.substring(0, 30)}...</a></td>
+                        </tr>
+                    `;
+                });
+            }
+            updateStatus();
+        }
+
+        async function loadM3UFiles() {
+            try {
+                const response = await fetch('/api/list_files');
+                const result = await response.json();
+                const tbody = document.getElementById('m3u-files-body');
+                tbody.innerHTML = '';
+
+                result.results.forEach(file => {
+                    tbody.innerHTML += `
+                        <tr ${file.status === 'Incompleto' ? 'class="incomplete"' : ''}>
+                            <td>${file.name}</td>
+                            <td>${file.total}</td>
+                            <td>${file.processed}</td>
+                            <td>${file.status}</td>
+                            <td>
+                                ${file.status === 'Incompleto' ? `<button class="btn reprocess-file" data-file-name="${file.name}">Reenviar</button>` : ''}
+                                <button class="btn delete-file" data-file-name="${file.name}">Excluir</button>
+                            </td>
+                        </tr>
+                    `;
+                });
+
+                document.querySelectorAll('.reprocess-file').forEach(button => {
+                    button.addEventListener('click', () => reprocessFile(button.getAttribute('data-file-name')));
+                });
+                document.querySelectorAll('.delete-file').forEach(button => {
+                    button.addEventListener('click', () => deleteFile(button.getAttribute('data-file-name')));
+                });
+            } catch (error) {
+                Swal.fire('Erro', 'Não foi possível carregar as listas M3U.', 'error');
+            }
+        }
+
+        async function reprocessFile(fileName) {
+            Swal.fire({ title: 'Reprocessando...', text: `Lista ${fileName}...`, allowOutsideClick: false, didOpen: () => Swal.showLoading() });
+            try {
+                const response = await fetch('/api/reprocess', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: 'reprocessFile=' + encodeURIComponent(fileName)
+                });
+                const result = await response.json();
+                if (!response.ok) throw new Error(result.results.error[0].message);
+                Swal.fire('Concluído', `Lista ${fileName} reprocessada!`, 'success');
+                loadM3UFiles();
+            } catch (error) {
+                Swal.fire('Erro', 'Erro ao reprocessar: ' + error.message, 'error');
+            }
+        }
+
+        async function deleteFile(fileName) {
+            const result = await Swal.fire({
+                title: 'Confirmar Exclusão',
+                text: `Deseja excluir ${fileName} e seus dados?`,
+                icon: 'warning',
+                showCancelButton: true,
+                confirmButtonText: 'Sim',
+                cancelButtonText: 'Não'
+            });
+
+            if (result.isConfirmed) {
+                try {
+                    const response = await fetch('/api/delete', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                        body: 'deleteFile=' + encodeURIComponent(fileName)
+                    });
+                    const result = await response.json();
+                    if (!response.ok) throw new Error(result.results.error[0].message);
+                    Swal.fire('Excluído', `Lista ${fileName} excluída!`, 'success');
+                    loadM3UFiles();
+                } catch (error) {
+                    Swal.fire('Erro', 'Erro ao excluir: ' + error.message, 'error');
+                }
+            }
+        }
+
+        async function listDuplicates() {
+            try {
+                const response = await fetch('/api/list_duplicates');
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.results.error[0].message);
+                showPopup('Duplicatas Encontradas', data);
+            } catch (error) {
+                Swal.fire('Erro', 'Erro ao listar duplicatas: ' + error.message, 'error');
+            }
+        }
+
+        async function deleteDuplicates() {
+            document.getElementById('deleteDuplicatesBtn').disabled = true;
+            showPopup('Removendo Duplicatas');
+            try {
+                const response = await fetch('/api/delete_duplicates', { method: 'POST' });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.results.error[0].message);
+                showPopup('Duplicatas Removidas', data);
+            } catch (error) {
+                showPopup('Erro', { results: { error: [{ message: error.message }] } });
+            }
+            document.getElementById('deleteDuplicatesBtn').disabled = false;
+        }
+
+        function showPopup(title, data = null) {
+            document.getElementById('popupTitle').textContent = title;
+            if (data && data.results) {
+                document.getElementById('popupTotalDuplicates').textContent = data.results.total_duplicates || '0';
+                document.getElementById('popupDeletedCount').textContent = data.results.deleted_count || '0';
+                document.getElementById('popupProgress').textContent = data.results.progress ? data.results.progress.toFixed(2) : '0';
+                const duplicatesList = document.getElementById('popupDuplicates');
+                duplicatesList.innerHTML = '';
+                if (data.results.remaining_duplicates?.length) {
+                    data.results.remaining_duplicates.forEach(dup => {
+                        const li = document.createElement('li');
+                        li.textContent = `${dup.midia_titulo} (${dup.midia_tipo}, URL: ${dup.player_url}) - ${dup.count} ocorrências`;
+                        duplicatesList.appendChild(li);
+                    });
+                }
+            }
+            document.getElementById('popup').style.display = 'block';
+            document.getElementById('overlay').style.display = 'block';
+        }
+
+        function closePopup() {
+            document.getElementById('popup').style.display = 'none';
+            document.getElementById('overlay').style.display = 'none';
+        }
+
+        function updateStatus() {
+            document.getElementById('totalRequests') && (document.getElementById('totalRequests').textContent = totalRequests);
+            document.getElementById('adicionando') && (document.getElementById('adicionando').textContent = adicionando);
+            document.getElementById('existente') && (document.getElementById('existente').textContent = existente);
+            document.getElementById('Erro') && (document.getElementById('Erro').textContent = Erro);
+        }
+    </script>
+</body>
+</html>

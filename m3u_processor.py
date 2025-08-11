@@ -11,8 +11,8 @@ logger = logging.getLogger()
 
 TMDB_API_KEY = 'ee4baf951a5ef055957a410f05f90eae'
 TMDB_BASE_URL = 'https://api.themoviedb.org/3'
-TMDB_IMAGE_BASE_URL = 'https://image.tmdb.org/t/p/w500'
-CACHE_DIR = '/www/wwwroot/live.revendaiptv.app.br/M3U/cache'
+TMDB_IMAGE_BASE_URL = 'https://image.tmdb.org/t/p/w300'
+CACHE_DIR = 'data/cache'
 CACHE_FILE = os.path.join(CACHE_DIR, 'tmdb_cache.json')
 
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -91,59 +91,83 @@ def search_tmdb(title, content_type):
         save_cache(cache)
         return result_data
 
-def process_m3u_content(content, db):
-    response = {'success': [], 'exists': [], 'error': []}
-    lines = content.splitlines()
-    current_entry = {}
+def _categorize_entry(group_title, channel_name):
+    line = f'group-title="{group_title}" ,{channel_name}'.lower()
 
-    for i, line in enumerate(lines):
-        line = line.strip()
+    live_keywords = [
+        'live', 'tv ', 'canal', 'channel', 'ao vivo', 'iptv',
+        'radio', 'rádio', 'news', 'notícias', 'sport', 'esporte',
+        'entertainment', 'music', 'kids', 'documentary', 'religioso',
+        'brasil', 'globo', 'sbt', 'record', 'band', 'fox ', 'cnn',
+        'discovery', 'cartoon', 'disney', 'hbo ', 'premium'
+    ]
+
+    series_keywords = [
+        'series', 'série', 'temporada', 'season', 'episodio', 'episode',
+        's01', 's02', 's03', 's04', 's05', 's06', 's07', 's08', 's09',
+        'e01', 'e02', 'e03', 'e04', 'e05', 'e06', 'e07', 'e08', 'e09',
+        'x01', 'x02', 'x03', 'x04', 'x05', 'cap ', 'capitulo'
+    ]
+
+    group = group_title.lower()
+    if any(keyword in group for keyword in live_keywords):
+        return 'canal'
+    if any(keyword in group for keyword in series_keywords):
+        return 'serie'
+    if any(keyword in group for keyword in ['filmes', 'movies', 'vod', 'crime', 'lancamentos']):
+        return 'filme'
+
+    name = channel_name.lower()
+    if re.search(r'\bs\d{1,2}e\d{1,2}\b|\bseason\s+\d+.*episode\s+\d+|\b\d{1,2}x\d{1,2}\b|\btemporada\s+\d+.*episodio\s+\d+', name):
+        return 'serie'
+    if any(keyword in name for keyword in series_keywords):
+        return 'serie'
+    if any(keyword in name for keyword in live_keywords):
+        return 'canal'
+
+    return 'filme'
+
+def parse_m3u_stream(line_iterator, limit=None):
+    entries = []
+    count = 0
+    for line in line_iterator:
+        if limit and count >= limit:
+            break
+        line = line.decode('utf-8', errors='ignore').strip()
         if line.startswith('#EXTINF:'):
-            match = re.search(r'#EXTINF:.*tvg-id="([^"]*)".*tvg-name="([^"]*)".*tvg-logo="([^"]*)".*group-title="([^"]*)",(.+)', line)
-            if match:
-                current_entry = {
-                    'tvg-id': match.group(1),
-                    'tvg-name': match.group(2),
-                    'tvg-logo': match.group(3),
-                    'group-title': match.group(4),
-                    'channel-name': match.group(5)
-                }
-            else:
-                response['error'].append({'message': f'Linha mal formatada: {line}'})
-        elif line.startswith('http') and current_entry:
-            current_entry['url'] = line
-            result = add_content_to_db(
-                db,
-                current_entry['tvg-id'],
-                current_entry['tvg-name'],
-                current_entry['tvg-logo'],
-                current_entry['group-title'],
-                current_entry['channel-name'],
-                current_entry['url']
-            )
-            response['success'].extend(result.get('success', []))
-            response['exists'].extend(result.get('exists', []))
-            response['error'].extend(result.get('error', []))
-            current_entry = {}
+            try:
+                url_line = next(line_iterator, b'').decode('utf-8', errors='ignore').strip()
+                if not url_line.startswith('http'):
+                    continue
 
-    return response
+                tvg_id_match = re.search(r'tvg-id="([^"]*)"', line)
+                tvg_name_match = re.search(r'tvg-name="([^"]*)"', line)
+                tvg_logo_match = re.search(r'tvg-logo="([^"]*)"', line)
+                group_title_match = re.search(r'group-title="([^"]*)"', line)
+                channel_name_match = re.search(r',(.+)$', line)
+
+                group_title = group_title_match.group(1) if group_title_match else ''
+                channel_name = channel_name_match.group(1) if channel_name_match else ''
+                
+                content_type = _categorize_entry(group_title, channel_name)
+
+                entry = {
+                    'tvg_id': tvg_id_match.group(1) if tvg_id_match else '',
+                    'tvg_name': tvg_name_match.group(1) if tvg_name_match else '',
+                    'tvg_logo': tvg_logo_match.group(1) if tvg_logo_match else '',
+                    'group_title': group_title_match.group(1) if group_title_match else '',
+                    'channel_name': channel_name_match.group(1) if channel_name_match else '',
+                    'url': url_line,
+                    'type': content_type
+                }
+                entries.append(entry)
+                count += 1
+            except Exception as e:
+                logger.error(f"Error processing line: {line} - {e}")
+    return entries
 
 def list_m3u_files(directory):
     return [f for f in os.listdir(directory) if f.endswith('.m3u')]
-
-def reprocess_file(file_path, db):
-    response = {'success': [], 'exists': [], 'error': []}
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-        entries = process_m3u_content(content, db)
-        response['success'].extend(entries.get('success', []))
-        response['exists'].extend(entries.get('exists', []))
-        response['error'].extend(entries.get('error', []))
-        return response
-    except Exception as e:
-        response['error'].append({'message': str(e)})
-        return response
 
 def extract_season_episode(title):
     season = re.search(r'[sS](\d+)', title, re.I)
@@ -173,7 +197,8 @@ def get_category_id(db, content_type):
 def add_content_to_db(db, tvg_id, tvg_name, tvg_logo, group_title, channel_name, url):
     response = {'success': [], 'exists': [], 'error': []}
     cursor = None
-
+    content_type = 'canal' # Initialize here
+    raw_title = (channel_name or tvg_name or 'Sem Título').strip()
     try:
         cursor = db.cursor(dictionary=True, buffered=True)
 
@@ -184,20 +209,37 @@ def add_content_to_db(db, tvg_id, tvg_name, tvg_logo, group_title, channel_name,
             media_id = existing_player['player_midia_id']
             cursor.execute("SELECT midia_titulo FROM midia WHERE midia_id = %s", (media_id,))
             media = cursor.fetchone()
-            response['exists'].append({
-                'type': 'unknown',
-                'data': {'titulo': media['midia_titulo'], 'groupTitle': group_title, 'url': url}
-            })
+            if media:
+                response['exists'].append({
+                    'type': 'unknown',
+                    'data': {'titulo': media['midia_titulo'], 'groupTitle': group_title, 'url': url}
+                })
+            else:
+                # Handle data inconsistency
+                response['exists'].append({
+                    'type': 'unknown',
+                    'data': {'titulo': 'Registro inconsistente', 'groupTitle': group_title, 'url': url}
+                })
             return response
-
-        content_type = 'canal'
+        
+        # Default category
         lower_group = (group_title or '').lower()
+
+        # More specific categories
         if 'filme' in lower_group:
             content_type = 'filme'
-        elif 'serie' in lower_group or 'série' in lower_group:
-            content_type = 'serie'
+        elif 'novela' in lower_group:
+            content_type = 'novela'
+        elif 'anime' in lower_group:
+            content_type = 'anime'
+        elif 'dorama' in lower_group:
+            content_type = 'dorama'
         elif 'infantil' in lower_group:
             content_type = 'infantil'
+        elif 'serie' in lower_group or 'série' in lower_group:
+            content_type = 'serie'
+        elif 'canal' in lower_group:
+            content_type = 'canal'
 
         raw_title = (channel_name or tvg_name or 'Sem Título').strip()
         title_data = extract_season_episode(raw_title)
@@ -282,5 +324,4 @@ def add_content_to_db(db, tvg_id, tvg_name, tvg_logo, group_title, channel_name,
     finally:
         if cursor:
             cursor.close()
-
     return response

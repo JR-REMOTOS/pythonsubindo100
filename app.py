@@ -4,13 +4,14 @@ import re
 import time
 import uuid
 from threading import Lock
-from flask import Flask, render_template, request, jsonify, send_from_directory
+from flask import Flask, Response, render_template, request, jsonify, send_from_directory
 from werkzeug.utils import secure_filename
 import logging
 import mysql.connector
 from database import get_db_connection, init_db
-from m3u_processor import process_m3u_content, list_m3u_files, reprocess_file, add_content_to_db
+from m3u_processor import parse_m3u_stream, list_m3u_files, add_content_to_db
 from duplicate_finder import find_duplicates, remove_duplicates
+from xtream_api import XtreamAPI
 
 # Configuração de logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -20,7 +21,7 @@ app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 
 # Diretório para arquivos M3U
-M3U_DIR = '/www/wwwroot/live.revendaiptv.app.br/M3U'
+M3U_DIR = 'data/m3u'
 os.makedirs(M3U_DIR, exist_ok=True)
 
 # Inicializar banco de dados
@@ -93,138 +94,76 @@ def upload_file():
     except Exception as e:
         app.logger.error(f"[{request_id}] Erro ao fazer upload: {str(e)}", exc_info=True)
         return jsonify({'results': {'error': [{'message': f"Erro ao fazer upload: {str(e)}"}]}}), 500
-        
-        
-@app.route('/api/process_small', methods=['POST'])
-def process_small():
-    db = None
+
+
+@app.route('/api/parse_m3u', methods=['POST'])
+def parse_m3u():
     request_id = str(uuid.uuid4())
     try:
-        app.logger.info(f"[{request_id}] Iniciando processamento pequeno")
-        content = request.form.get('m3u_content')
-        if not content:
-            app.logger.error(f"[{request_id}] Nenhum conteúdo fornecido")
-            return jsonify({'results': {'error': [{'message': 'Nenhum conteúdo fornecido'}]}}), 400
+        app.logger.info(f"[{request_id}] Iniciando streaming de M3U")
+        data = request.get_json()
+        base_url = data.get('base_url')
+        username = data.get('username')
+        password = data.get('password')
+
+        if not all([base_url, username, password]):
+            return jsonify({'error': 'URL, usuário e senha são obrigatórios'}), 400
+
+        xtream_api = XtreamAPI(base_url, username, password)
+        m3u_iterator = xtream_api.download_m3u()
+
+        if not m3u_iterator:
+            return jsonify({'error': 'Falha ao baixar a lista M3U'}), 500
+
+        def generate():
+            for chunk in m3u_iterator:
+                yield chunk
+
+        return Response(generate(), mimetype='text/plain')
+
+    except Exception as e:
+        app.logger.error(f"[{request_id}] Erro ao parsear M3U: {str(e)}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/add_items_to_db', methods=['POST'])
+def add_items_to_db():
+    request_id = str(uuid.uuid4())
+    db = None
+    try:
+        app.logger.info(f"[{request_id}] Adicionando itens ao banco de dados")
+        data = request.get_json()
+        items = data.get('items')
+
+        if not items:
+            return jsonify({'error': 'Nenhum item para adicionar'}), 400
 
         db = get_db_connection()
-        result = process_m3u_content(content, db)
-        app.logger.info(f"[{request_id}] Processamento concluído: {len(result.get('success', []))} sucessos")
-        return jsonify({'results': result})
+        response = {'success': [], 'exists': [], 'error': []}
+        
+        for item in items:
+            result = add_content_to_db(
+                db,
+                item.get('tvg_id'),
+                item.get('tvg_name'),
+                item.get('tvg_logo'),
+                item.get('group_title'),
+                item.get('channel_name'),
+                item.get('url')
+            )
+            response['success'].extend(result.get('success', []))
+            response['exists'].extend(result.get('exists', []))
+            response['error'].extend(result.get('error', []))
+        
+        db.commit()
+        return jsonify(response)
+
     except Exception as e:
-        app.logger.error(f"[{request_id}] Erro ao processar: {str(e)}", exc_info=True)
-        return jsonify({'results': {'error': [{'message': f"Erro ao processar: {str(e)}"}]}}), 500
+        app.logger.error(f"[{request_id}] Erro ao adicionar itens ao DB: {str(e)}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
     finally:
         if db and db.is_connected():
             db.close()
 
-@app.route('/api/process_large', methods=['POST'])
-def process_large():
-    db = None
-    request_id = str(uuid.uuid4())
-    try:
-        app.logger.info(f"[{request_id}] Iniciando processamento grande")
-        filename = request.form.get('processLargeFile')
-        if not filename:
-            app.logger.error(f"[{request_id}] Nenhum arquivo especificado")
-            return jsonify({'results': {'error': [{'message': 'Nenhum arquivo especificado'}]}}), 400
-
-        m3u_path = os.path.join(M3U_DIR, filename)
-        if not os.path.exists(m3u_path):
-            app.logger.error(f"[{request_id}] Arquivo não encontrado: {m3u_path}")
-            return jsonify({'results': {'error': [{'message': 'Arquivo não encontrado'}]}}), 404
-
-        progress_file = os.path.join(M3U_DIR, f"{filename}.progress.json")
-        chunk_size = 100
-
-        total_urls = 0
-        with open(m3u_path, 'r', encoding='utf-8') as f:
-            lines = enumerate(f)
-            for i, line in lines:
-                if line.strip().startswith('#EXTINF:'):
-                    try:
-                        next_line = next(lines)[1]
-                        if next_line.strip().startswith('http'):
-                            total_urls += 1
-                    except StopIteration:
-                        break
-
-        if os.path.exists(progress_file):
-            with open(progress_file, 'r') as f:
-                progress_data = json.load(f)
-        else:
-            progress_data = {'processed_urls': 0, 'total_urls': total_urls, 'results': {'success': [], 'exists': [], 'error': []}}
-
-        start_url = progress_data['processed_urls']
-        end_url = min(start_url + chunk_size, total_urls)
-        chunk_results = {'success': [], 'exists': [], 'error': []}
-
-        db = get_db_connection()
-        db.start_transaction()
-        try:
-            with open(m3u_path, 'r', encoding='utf-8') as f:
-                lines = enumerate(f)
-                current_url_idx = 0
-                for i, line in lines:
-                    if line.strip().startswith('#EXTINF:'):
-                        try:
-                            next_line = next(lines)[1]
-                            if next_line.strip().startswith('http'):
-                                current_url_idx += 1
-                                if start_url <= current_url_idx - 1 < end_url:
-                                    extinf_line = line.strip()
-                                    url_line = next_line.strip()
-                                    match = re.match(r'#EXTINF:-?\d+(?:.*?(tvg-id="([^"]*)"))?(?:.*?(tvg-name="([^"]*)"))?(?:.*?(tvg-logo="([^"]*)"))?(?:.*?(group-title="([^"]*)"))?.*,(.+)', extinf_line)
-                                    if match:
-                                        tvg_id = match.group(2) or ''
-                                        tvg_name = match.group(4) or ''
-                                        tvg_logo = match.group(6) or ''
-                                        group_title = match.group(8) or 'Sem Grupo'
-                                        channel_name = match.group(9).strip()
-                                        result = add_content_to_db(db, tvg_id, tvg_name, tvg_logo, group_title, channel_name, url_line)
-                                        chunk_results['success'].extend(result['success'])
-                                        chunk_results['exists'].extend(result['exists'])
-                                        chunk_results['error'].extend(result['error'])
-                                    else:
-                                        chunk_results['error'].append({'message': f'Formato #EXTINF inválido: {extinf_line}'})
-                        except StopIteration:
-                            break
-            db.commit()
-        except Exception as e:
-            db.rollback()
-            raise
-
-        progress_data['processed_urls'] += len(chunk_results['success']) + len(chunk_results['exists'])
-        progress_data['results']['success'].extend(chunk_results['success'])
-        progress_data['results']['exists'].extend(chunk_results['exists'])
-        progress_data['results']['error'].extend(chunk_results['error'])
-
-        processed = progress_data['processed_urls']
-        total = progress_data['total_urls']
-        progress = (processed / total * 100) if total > 0 else 0
-
-        with open(progress_file, 'w') as f:
-            json.dump(progress_data, f, ensure_ascii=False, indent=4)
-
-        if progress >= 100 and os.path.exists(progress_file):
-            os.remove(progress_file)
-
-        app.logger.info(f"[{request_id}] Progresso: {processed}/{total} ({progress:.2f}%)")
-        return jsonify({
-            'results': {
-                'success': chunk_results['success'],
-                'exists': chunk_results['exists'],
-                'error': chunk_results['error'],
-                'processed': processed,
-                'total': total,
-                'progress': progress
-            }
-        })
-    except Exception as e:
-        app.logger.error(f"[{request_id}] Erro ao processar: {str(e)}", exc_info=True)
-        return jsonify({'results': {'error': [{'message': f"Erro ao processar: {str(e)}"}]}}), 500
-    finally:
-        if db and db.is_connected():
-            db.close()
 
 @app.route('/api/list_files', methods=['GET'])
 def list_files():
@@ -263,36 +202,6 @@ def list_files():
     except Exception as e:
         app.logger.error(f"[{request_id}] Erro ao listar: {str(e)}", exc_info=True)
         return jsonify({'results': {'error': [{'message': f"Erro ao listar: {str(e)}"}]}}), 500
-
-@app.route('/api/reprocess', methods=['POST'])
-def reprocess():
-    db = None
-    request_id = str(uuid.uuid4())
-    try:
-        app.logger.info(f"[{request_id}] Iniciando reprocessamento")
-        filename = request.form.get('reprocessFile')
-        if not filename:
-            app.logger.error(f"[{request_id}] Nenhum arquivo especificado")
-            return jsonify({'results': {'error': [{'message': 'Nenhum arquivo especificado'}]}}), 400
-
-        m3u_path = os.path.join(M3U_DIR, filename)
-        if not os.path.exists(m3u_path):
-            app.logger.error(f"[{request_id}] Arquivo não encontrado: {m3u_path}")
-            return jsonify({'results': {'error': [{'message': 'Arquivo não encontrado'}]}}), 404
-
-        progress_file = os.path.join(M3U_DIR, f"{filename}.progress.json")
-        if os.path.exists(progress_file):
-            os.remove(progress_file)
-
-        db = get_db_connection()
-        result = reprocess_file(m3u_path, db)
-        return jsonify({'results': result})
-    except Exception as e:
-        app.logger.error(f"[{request_id}] Erro ao reprocessar: {str(e)}", exc_info=True)
-        return jsonify({'results': {'error': [{'message': f"Erro ao reprocessar: {str(e)}"}]}}), 500
-    finally:
-        if db and db.is_connected():
-            db.close()
 
 @app.route('/api/delete', methods=['POST'])
 def delete():
@@ -376,6 +285,81 @@ def delete():
             db.close()
             
             
+
+@app.route('/api/get_all_content', methods=['GET'])
+def get_all_content():
+    db = None
+    try:
+        db = get_db_connection()
+        cursor = db.cursor(dictionary=True)
+        
+        query = "SELECT midia_id, midia_titulo, midia_tipo FROM midia ORDER BY midia_id DESC"
+        cursor.execute(query)
+        items = cursor.fetchall()
+        
+        return jsonify(items)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if db and db.is_connected():
+            db.close()
+
+@app.route('/api/update_content/<int:media_id>', methods=['POST'])
+def update_content(media_id):
+    db = None
+    try:
+        db = get_db_connection()
+        cursor = db.cursor()
+        data = request.get_json()
+        
+        query = "UPDATE midia SET midia_titulo = %s WHERE midia_id = %s"
+        cursor.execute(query, (data['title'], media_id))
+        db.commit()
+        
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if db and db.is_connected():
+            db.close()
+
+@app.route('/api/delete_content/<int:media_id>', methods=['DELETE'])
+def delete_content(media_id):
+    db = None
+    try:
+        db = get_db_connection()
+        cursor = db.cursor()
+        
+        # You might want to delete from other tables as well (e.g., midia_players)
+        cursor.execute("DELETE FROM midia WHERE midia_id = %s", (media_id,))
+        db.commit()
+        
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if db and db.is_connected():
+            db.close()
+
+@app.route('/api/bulk_delete_content', methods=['POST'])
+def bulk_delete_content():
+    db = None
+    try:
+        db = get_db_connection()
+        cursor = db.cursor()
+        data = request.get_json()
+        content_type = data['type']
+        
+        query = "DELETE FROM midia WHERE midia_tipo = %s"
+        cursor.execute(query, (content_type,))
+        db.commit()
+        
+        return jsonify({'success': True, 'deleted_count': cursor.rowcount})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if db and db.is_connected():
+            db.close()
 
 @app.route('/api/list_duplicates', methods=['GET'])
 def list_duplicates():
